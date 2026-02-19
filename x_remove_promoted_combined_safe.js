@@ -1,145 +1,84 @@
-// x_remove_promoted_combined_safe.js
-// 适用于 Shadowrocket 的 http-response 脚本（safe 版本）
-// 目的：优先精确清理 X timeline 的 promoted 条目，辅以保守递归字段清理
-// 安全策略：尽量只删除明显的广告条目或字段；任何异常或没有变更时回退原始响应
+// 优化的 X (Twitter) 去广告脚本 - 高效精准版
+// 移除了危险的全局字符串匹配和高耗时的全局递归
 
 function safeParse(body) {
   try { return JSON.parse(body); } catch (e) { return null; }
 }
 
-function isClearlyPromoted(obj) {
-  if (!obj || typeof obj !== 'object') return false;
-  // 明确的推广字段或广告标识
-  if (obj.promoted_tweet_id || obj.promoted_tweet_ad_id || obj.is_promoted === true) return true;
-  if (obj.promoted_metadata || obj.advertiser_info || obj.promoted) return true;
-  // 某些条目的 id/name 会包含 promoted/advert 字样
-  if (obj.entryId && typeof obj.entryId === 'string') {
-    const id = obj.entryId.toLowerCase();
-    if (id.includes('promoted') || id.includes('advert')) return true;
-  }
-  return false;
-}
-
-// 保守型：只删除明显被判定为广告的数组元素或对象字段
-function cleanObjectConservative(root) {
-  if (Array.isArray(root)) {
-    const out = [];
-    for (const el of root) {
-      if (isClearlyPromoted(el)) continue;
-      if (typeof el === 'object' && el !== null) {
-        const cleaned = cleanObjectConservative(el);
-        // 如果对象被完全判定为删除（null），跳过；否则保留
-        if (cleaned !== null) out.push(cleaned);
-      } else {
-        out.push(el);
-      }
-    }
-    return out;
-  } else if (root && typeof root === 'object') {
-    if (isClearlyPromoted(root)) return null; // 顶层对象若明确是 promoted，则删除
-    const out = {};
-    for (const k of Object.keys(root)) {
-      try {
-        const v = root[k];
-        if (v === null) { out[k] = v; continue; }
-        if (Array.isArray(v)) {
-          out[k] = cleanObjectConservative(v);
-        } else if (typeof v === 'object') {
-          const cleaned = cleanObjectConservative(v);
-          if (cleaned === null) {
-            // 仅当该字段明确为 promoted 时删除字段，否则保留原值
-            //（这里我们删除字段以避免残留广告对象）
-            continue;
-          } else out[k] = cleaned;
-        } else {
-          // 基本类型：如果字符串中明确带 promoted/advert 标记则跳过字段（保守）
-          if (typeof v === 'string') {
-            const vl = v.toLowerCase();
-            if (vl.includes('promoted') || vl.includes('promot') || vl.includes('advert') || vl.includes('sponsor')) {
-              continue;
-            }
-          }
-          out[k] = v;
-        }
-      } catch (e) {
-        // 出错则保守回退该字段原值
-        out[k] = root[k];
-      }
-    }
-    return out;
-  }
-  return root;
-}
-
-// 精确处理：处理 timeline instructions 中的 entries（你原脚本的思路）
+// 仅针对 Timeline 的 entries 数组进行精确过滤
 function filterTimelineInstructions(instructions) {
-  if (!Array.isArray(instructions)) return;
+  if (!Array.isArray(instructions)) return false;
+  let modified = false;
+
   for (const ins of instructions) {
-    try {
-      if (!ins || typeof ins !== 'object') continue;
-      // 不同版本的 instruction 名称可能不同，优先匹配 TimelineAddEntries / timeline entries
-      if (ins.type && typeof ins.type === 'string' && ins.entries && Array.isArray(ins.entries)) {
-        ins.entries = ins.entries.filter(entry => {
-          // 检查 entryId 与 entry.content.itemContent.promoted_metadata 等
-          let promoted = false;
-          try {
-            const entryId = entry.entryId || '';
-            if (typeof entryId === 'string' && (entryId.toLowerCase().includes('promoted') || entryId.toLowerCase().includes('advert'))) promoted = true;
-          } catch (e) {}
-          try {
-            const pm = entry.content?.itemContent?.promoted_metadata || entry.content?.itemContent?.promoted;
-            if (pm) promoted = true;
-          } catch (e) {}
-          // 如果条目被明确标记为 promoted 或包含广告元数据，则过滤掉
-          if (promoted) return false;
-          // 否则保留
-          return true;
-        });
+    if (!ins || typeof ins !== 'object') continue;
+    
+    // 匹配 TimelineAddEntries 类型的指令
+    if ((ins.type === 'TimelineAddEntries' || ins.type === 'TimelineReplaceEntry') && Array.isArray(ins.entries)) {
+      const originalLength = ins.entries.length;
+      
+      ins.entries = ins.entries.filter(entry => {
+        let isAd = false;
+        
+        // 1. 检查 entryId 是否包含广告标识
+        const entryId = entry.entryId || '';
+        if (typeof entryId === 'string') {
+          const idLower = entryId.toLowerCase();
+          if (idLower.includes('promoted') || idLower.includes('advert')) {
+            isAd = true;
+          }
+        }
+        
+        // 2. 检查内部内容是否带有广告元数据 (精确匹配字段名，绝不误杀正文)
+        try {
+          const itemContent = entry.content?.itemContent || entry.item?.itemContent;
+          if (itemContent && (itemContent.promotedMetadata || itemContent.promoted_metadata || itemContent.promoted)) {
+            isAd = true;
+          }
+        } catch (e) {}
+
+        return !isAd; // 是广告则过滤掉 (返回 false)
+      });
+
+      if (ins.entries.length !== originalLength) {
+        modified = true;
       }
-    } catch (e) {
-      // 忽略单个 instruction 的错误，继续处理其他 instruction
-      continue;
     }
   }
+  return modified;
 }
 
 try {
   if (!$response || !$response.body) {
-    $done({body: $response ? $response.body : ''});
+    $done({});
   } else {
     const originalBody = $response.body;
     const json = safeParse(originalBody);
+    
     if (!json) {
-      // 非 JSON，直接返回原始响应
-      $done({body: originalBody});
+      $done({body: originalBody}); // 非 JSON，直接放行
     } else {
-      // 1) 优先尝试精确路径（home / search / user timeline 等）
-      try {
-        if (json.data?.home?.home_timeline_urt?.instructions) {
-          filterTimelineInstructions(json.data.home.home_timeline_urt.instructions);
-        } else if (json.data?.search_by_raw_query?.search_timeline?.timeline?.instructions) {
-          filterTimelineInstructions(json.data.search_by_raw_query.search_timeline.timeline.instructions);
-        } else if (json.data?.timeline?.instructions) {
-          // 兼容不同命名的 timeline
-          filterTimelineInstructions(json.data.timeline.instructions);
-        }
-      } catch (e) {
-        // 忽略路径错误，继续后续保守清理
+      let isModified = false;
+
+      // 精确拦截 X 的主要 Timeline 路径
+      if (json.data?.home?.home_timeline_urt?.instructions) {
+        isModified = filterTimelineInstructions(json.data.home.home_timeline_urt.instructions);
+      } else if (json.data?.search_by_raw_query?.search_timeline?.timeline?.instructions) {
+        isModified = filterTimelineInstructions(json.data.search_by_raw_query.search_timeline.timeline.instructions);
+      } else if (json.data?.user?.result?.timeline_v2?.timeline?.instructions) {
+        isModified = filterTimelineInstructions(json.data.user.result.timeline_v2.timeline.instructions);
       }
 
-      // 2) 保守递归清理：只删除明显广告对象或字段
-      const cleaned = cleanObjectConservative(json);
-
-      // 3) 若 cleaned 与原始相同（没有变更），直接返回原始，避免触发不必要的差异
-      const outStr = JSON.stringify(cleaned);
-      if (!outStr || outStr.length === 0 || outStr === originalBody) {
-        $done({body: originalBody});
+      // 如果有修改，则返回新的 JSON 字符串；否则返回原数据节约开销
+      if (isModified) {
+        $done({body: JSON.stringify(json)});
       } else {
-        $done({body: outStr});
+        $done({body: originalBody});
       }
     }
   }
 } catch (err) {
-  // 出错时回退为原始响应，保证稳定性
-  $done({body: $response && $response.body ? $response.body : ''});
+  // 发生任何异常，安全放行原始数据
+  console.log(`X 去广告脚本执行异常: ${err}`);
+  $done({body: $response.body || ''});
 }
