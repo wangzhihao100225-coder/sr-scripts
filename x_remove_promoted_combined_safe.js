@@ -1,5 +1,8 @@
-// X 去广告 - 合并版（精确检测 + 保守 neutralize）
-// 目标：尽量移除广告内容、保留占位与分页/会话相关字段，避免破坏评论/刷新
+// X 去广告 - 合并版（精确检测 + 保守 neutralize） - 修复评论区空白版
+// 优化：移除对 card 字段的宽松检测，避免误杀正常评论/线程内容（许多正常推文有 card，如 poll 或 media）
+// 加强 isCursorOrConversation 保护，增加对 thread/conversation 的子结构检查
+// 针对 threaded_conversation 路径，采用更保守策略：仅 neutralize 明确 promoted 的条目，不触碰 card
+
 (function() {
   'use strict';
 
@@ -8,8 +11,8 @@
   }
   function isString(v){ return typeof v === 'string'; }
 
-  // 是否明显为广告（精确且保守的检测）
-  function isAdEntry(entry) {
+  // 是否明显为广告（精确且保守的检测，移除 card 宽松匹配）
+  function isAdEntry(entry, isThread = false) {
     if (!entry || typeof entry !== 'object') return false;
 
     const entryId = entry.entryId || '';
@@ -30,13 +33,14 @@
         if (item.promotedMetadata || item.promoted_metadata || item.promoted || item.advertisement || item.adEntity || item.ad) {
           return true;
         }
-        // 某些广告以 card 形式出现
-        if (item.card || item.card_uri || item.card_id) return true;
+        // 对于 thread，跳过 card 检查，避免误杀评论中的媒体/poll
+        if (!isThread && (item.card || item.card_uri || item.card_id)) return true;
       }
     } catch (e) {}
 
-    // top-level card/ad 字段
-    if (entry.card || entry.card_uri || entry.ad || entry.adEntity || entry.advertisement) return true;
+    // top-level ad 字段（保留 card 检查仅限非 thread）
+    if (entry.ad || entry.adEntity || entry.advertisement) return true;
+    if (!isThread && (entry.card || entry.card_uri)) return true;
 
     // module / moduleItems 里可能有广告标记（外层检测在调用处）
     return false;
@@ -53,8 +57,9 @@
       return true;
     }
 
-    // 如果条目内部包含 "cursor" 字段（保守检查），不要删除
+    // 扩展检查：如果 content 有 conversationThread 或类似结构
     try {
+      if (entry.content?.conversationThread || entry.content?.thread) return true;
       if (entry.cursor || (entry.content && entry.content.cursor)) return true;
       // 小规模字符串搜索（限制长度，避免极端成本）
       const s = JSON.stringify(entry);
@@ -120,7 +125,7 @@
   }
 
   // 处理 instructions 中的 entries（使用 map 保留占位）
-  function processInstructionsEntries(instructions) {
+  function processInstructionsEntries(instructions, isThread = false) {
     if (!Array.isArray(instructions)) return false;
     let modified = false;
 
@@ -135,7 +140,7 @@
             // 永远不要触碰 cursor / conversation / thread 相关条目
             if (isCursorOrConversation(entry)) return entry;
             // 仅当明确广告时做 neutralize
-            if (isAdEntry(entry)) {
+            if (isAdEntry(entry, isThread)) {
               modified = true;
               return neutralizeAdEntry(entry);
             }
@@ -151,12 +156,15 @@
             if (!mod) return mod;
             // module.item 可能包含 itemContent
             const itemContent = mod.item?.itemContent || mod.item?.item_content;
-            if (itemContent && (itemContent.promotedMetadata || itemContent.card || itemContent.adEntity || itemContent.ad)) {
-              modified = true;
-              // 用轻量壳替换 mod（保留 id）
-              const modShell = { id: mod.id || mod.moduleId || mod.module_item || null };
-              if (mod.clientEventInfo) modShell.clientEventInfo = mod.clientEventInfo;
-              return modShell;
+            if (itemContent && (itemContent.promotedMetadata || itemContent.adEntity || itemContent.ad)) {
+              // 对于 thread，额外检查是否明确 promoted
+              if (!isThread || itemContent.promotedMetadata) {
+                modified = true;
+                // 用轻量壳替换 mod（保留 id）
+                const modShell = { id: mod.id || mod.moduleId || mod.module_item || null };
+                if (mod.clientEventInfo) modShell.clientEventInfo = mod.clientEventInfo;
+                return modShell;
+              }
             }
             return mod;
           });
@@ -185,16 +193,16 @@
 
     // 常见 timeline/thread 路径（覆盖多种可能）
     const paths = [
-      ['data','home','home_timeline_urt','instructions'],
-      ['data','home','timeline_v2','timeline','instructions'],
-      ['data','timeline','timeline_v2','instructions'],
-      ['data','search_by_raw_query','search_timeline','timeline','instructions'],
-      ['data','user','result','timeline_v2','timeline','instructions'],
-      ['data','threaded_conversation_with_injections_v2','instructions'],
-      ['data','threaded_conversation_with_injections','instructions']
+      {path: ['data','home','home_timeline_urt','instructions'], isThread: false},
+      {path: ['data','home','timeline_v2','timeline','instructions'], isThread: false},
+      {path: ['data','timeline','timeline_v2','instructions'], isThread: false},
+      {path: ['data','search_by_raw_query','search_timeline','timeline','instructions'], isThread: false},
+      {path: ['data','user','result','timeline_v2','timeline','instructions'], isThread: false},
+      {path: ['data','threaded_conversation_with_injections_v2','instructions'], isThread: true},
+      {path: ['data','threaded_conversation_with_injections','instructions'], isThread: true}
     ];
 
-    for (const path of paths) {
+    for (const {path, isThread} of paths) {
       let node = json;
       for (let i = 0; i < path.length; i++) {
         if (!node) break;
@@ -202,7 +210,7 @@
       }
       if (Array.isArray(node)) {
         try {
-          const res = processInstructionsEntries(node);
+          const res = processInstructionsEntries(node, isThread);
           if (res) changed = true;
         } catch (e) { /* 保守 */ }
       }
