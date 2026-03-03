@@ -1,7 +1,8 @@
-// ==UserScript==
-// @name         X (Twitter) 去广告 - 高可用终极版
-// @description  整合多语言正则检测、Timeline彻底过滤、Thread防断层保护与安全回滚机制
-// ==/UserScript==
+// X (Twitter) 去广告 - 终极高可用版 (兼容 Stash / QX / Surge / Loon)
+// 核心特性：
+// 1. 彻底剔除 Timeline 广告，拒绝“去标不去底”的占位符残留。
+// 2. 战略性放行 Thread (评论区) 数据，100% 解决评论区断流/无法刷新问题。
+// 3. 引入严格的作用域隔离与异常回滚机制 (Fallback)，防止 OOM 和 App 崩溃。
 
 (function() {
   'use strict';
@@ -9,13 +10,13 @@
   function safeParse(body) {
     try { return JSON.parse(body); } catch (e) { return null; }
   }
-  
   function isString(v){ return typeof v === 'string'; }
 
-  // 增强广告检测：多语言正则
+  // 强大的多语言广告关键词正则
   const adKeywordsRegex = /Promoted|Gesponsert|Promocionado|Sponsorisé|Sponsorizzato|Promowane|Promovido|Реклама|Uitgelicht|Sponsorlu|Promotert|Promoveret|Sponsrad|Mainostettu|Sponzorováno|Promovat|Ajánlott|Προωθημένο|Dipromosikan|Được quảng bá|推廣|推广|推薦|推荐|プロモーション|프로모션|ประชาสัมพันธ์|प्रचारित|বিজ্ঞাপিত|تشہیر شدہ|مُروَّج|تبلیغی|מקודם|Ad|Sponsored|Boosted/i;
 
-  function isAdEntry(entry, isThread = false) {
+  // 核心广告检测逻辑
+  function isAdEntry(entry) {
     if (!entry || typeof entry !== 'object') return false;
 
     const entryId = entry.entryId || '';
@@ -31,7 +32,7 @@
       return true;
     }
 
-    // 内部字段检查
+    // 字段深度检查
     try {
       const item = entry.content?.itemContent || entry.item?.itemContent || entry.content?.item_content;
       if (item) {
@@ -43,21 +44,21 @@
         // 文本匹配：检查item中可能含ad关键词的字段
         if (item.legacy?.text && adKeywordsRegex.test(item.legacy.text)) return true;
         if (item.displayType && adKeywordsRegex.test(item.displayType)) return true;
-        if (!isThread && (item.card || item.card_uri || item.card_id)) return true;
+        if (item.card || item.card_uri || item.card_id) return true; 
       }
     } catch (e) {}
 
     // Top-level字段
     if (entry.ad || entry.adEntity || entry.advertisement || entry.sponsored) return true;
-    if (!isThread && (entry.card || entry.card_uri)) return true;
+    if (entry.card || entry.card_uri) return true;
 
-    // 数据类型映射
+    // data-testid映射
     if (entry.__typename && (entry.__typename.includes('Promoted') || entry.__typename.includes('Ad'))) return true;
 
     return false;
   }
 
-  // 保护cursor/conversation等分页与上下文机制
+  // 保护分页游标和正常对话流
   function isCursorOrConversation(entry) {
     if (!entry || typeof entry !== 'object') return false;
     const entryId = entry.entryId || '';
@@ -76,106 +77,60 @@
     return false;
   }
 
-  // 中和：浅拷贝保留结构，只删广告字段（用于Thread防断层）
-  function neutralizeAdEntry(entry, isThread = false) {
-    try {
-      const shell = { ...entry }; 
-      if (shell.content?.itemContent) {
-        delete shell.content.itemContent.promotedMetadata;
-        delete shell.content.itemContent.promoted_metadata;
-        delete shell.content.itemContent.promoted;
-        delete shell.content.itemContent.advertisement;
-        delete shell.content.itemContent.adEntity;
-        delete shell.content.itemContent.ad;
-        delete shell.content.itemContent.sponsoredMetadata;
-        delete shell.content.itemContent.boosted;
-        delete shell.content.itemContent.ad_info;
-        delete shell.content.itemContent.promotion;
-      }
-      if (shell.ad || shell.adEntity || shell.advertisement || shell.sponsored) {
-        delete shell.ad;
-        delete shell.adEntity;
-        delete shell.advertisement;
-        delete shell.sponsored;
-      }
-      return shell;
-    } catch (e) {
-      console.log(`Neutralize error: ${e}`);
-      return entry;
-    }
-  }
-
-  // 核心处理逻辑 (优化版)
-  function processInstructionsEntries(instructions, isThread = false) {
+  // 核心过滤执行器
+  function processInstructionsEntries(instructions) {
     if (!Array.isArray(instructions)) return false;
     let modified = false;
     let removedCount = 0;
 
-    // 配置：thread中是否激进去除（默认保守 false，防止评论树断裂）
-    const aggressiveThreadMode = false;
-
     for (const ins of instructions) {
       if (!ins || typeof ins !== 'object') continue;
 
-      // --- 处理 Entries ---
+      // --- 1. 处理主信息流 Entries ---
       if (Array.isArray(ins.entries)) {
-        let originalEntries; // 提升作用域，确保 catch 能够访问到进行回滚
+        let originalEntries; // 声明在 try 外部，保证 catch 能访问
         try {
-          originalEntries = [...ins.entries]; 
+          originalEntries = [...ins.entries];
           const originalLength = ins.entries.length;
 
           ins.entries = ins.entries.filter(entry => {
             if (!entry || isCursorOrConversation(entry)) return true;
 
-            if (isAdEntry(entry, isThread)) {
-              // 极端的误杀防范：如果被判定为广告，但没有任何官方广告标签，且包含正文，予以放行
+            if (isAdEntry(entry)) {
+              // 极端严格的防误杀：如果非常像广告，但缺失了核心的推广元数据，且带有正常文本，则放过
               const item = entry.content?.itemContent || entry.item?.itemContent;
-              if (item && item.legacy?.text && !item.promotedMetadata && !item.sponsoredMetadata && !entry.adEntity) {
-                 console.log(`Potential miskill avoided: ${entry.entryId}`);
+              if (item && item.legacy?.text && !item.promotedMetadata && !item.sponsoredMetadata && !entry.adEntity && !entry.ad) {
+                 console.log(`[X-Ad-Blocker] Potential miskill avoided: ${entry.entryId}`);
                  return true;
               }
 
               modified = true;
               removedCount++;
-              
-              if (isThread && !aggressiveThreadMode) {
-                return true; // Thread保守模式：保留在数组中，交给后面的 map 去中和
-              }
-              console.log(`Removed ad entry completely: ${entry.entryId}`);
-              return false; // Timeline 模式：彻底从数组中移除
+              console.log(`[X-Ad-Blocker] Removed ad entry: ${entry.entryId}`);
+              return false; // 触发剔除
             }
-            return true; 
+            return true; // 正常推文保留
           });
 
-          // Fallback回滚机制：如果单次请求被移除的数据超过 50%，且总数据量大于 4 条，触发安全回滚防崩溃
-          if (originalLength > 4 && ins.entries.length < originalLength * 0.5) {
-            console.log(`Warning: Too many removals (${removedCount}/${originalLength}), partial rollback triggered.`);
-            ins.entries = originalEntries; 
-            modified = false; 
+          // Fallback 回滚机制：如果剔除超过 50% 的数据，认定为 X 接口大改，执行安全回滚
+          if (ins.entries.length < originalLength * 0.5) {
+            console.log(`[X-Ad-Blocker] Warning: High removal rate (${removedCount}/${originalLength}), fallback triggered.`);
+            ins.entries = originalEntries;
+            modified = false;
             removedCount = 0;
           }
-
-          // 处理保守模式下保留的广告（去标不去底，保证 Thread 上下文不断裂）
-          if (isThread && modified && !aggressiveThreadMode) {
-            ins.entries = ins.entries.map(entry => {
-              if (isAdEntry(entry, true)) {
-                return neutralizeAdEntry(entry, true);
-              }
-              return entry;
-            });
-          }
         } catch (e) {
-          console.log(`Entries process error: ${e}`);
-          if (originalEntries) ins.entries = originalEntries; // 异常时安全回滚
+          console.log(`[X-Ad-Blocker] Entries process error: ${e}`);
+          if (originalEntries) ins.entries = originalEntries; 
         }
       }
 
-      // --- 处理 Module Items (如“可能感兴趣的用户”模块中的广告) ---
+      // --- 2. 处理模块级广告 Module Items ---
       if (Array.isArray(ins.moduleItems)) {
         let originalModuleItems;
         try {
           originalModuleItems = [...ins.moduleItems];
-          const originalModLength = ins.moduleItems.length;
+          const originalLength = ins.moduleItems.length;
 
           ins.moduleItems = ins.moduleItems.filter(mod => {
             if (!mod) return true;
@@ -183,28 +138,31 @@
             if (itemContent && (itemContent.promotedMetadata || itemContent.adEntity || itemContent.ad || itemContent.sponsoredMetadata)) {
               modified = true;
               removedCount++;
-              console.log(`Removed ad module completely: ${mod.id || 'unknown'}`);
+              console.log(`[X-Ad-Blocker] Removed ad module: ${mod.id || 'unknown'}`);
               return false;
             }
             return true;
           });
 
-          if (originalModLength > 2 && ins.moduleItems.length < originalModLength * 0.5) {
-            console.log(`Warning: Too many module removals, rollback triggered.`);
+          if (ins.moduleItems.length < originalLength * 0.5) {
+            console.log(`[X-Ad-Blocker] Warning: High module removal rate, fallback triggered.`);
             ins.moduleItems = originalModuleItems;
           }
         } catch (e) {
-          console.log(`Module process error: ${e}`);
+          console.log(`[X-Ad-Blocker] Module process error: ${e}`);
           if (originalModuleItems) ins.moduleItems = originalModuleItems;
         }
       }
     }
 
-    if (modified) console.log(`Total modifications: ${removedCount} items processed (isThread: ${isThread})`);
+    if (modified) {
+      console.log(`[X-Ad-Blocker] Successfully cleaned ${removedCount} ads.`);
+    }
+
     return modified;
   }
 
-  // --- 主执行入口 ---
+  // --- 脚本主入口 ---
   try {
     if (typeof $response === 'undefined' || !$response || !$response.body) {
       $done({});
@@ -220,20 +178,18 @@
 
     let changed = false;
 
-    // 遍历所有可能的 X 数据下发路径
+    // ⚠️ 战略性拦截路径：仅包含 Timeline，已彻底移出 Thread 路径，确保评论区不断流
     const paths = [
-      {path: ['data','home','home_timeline_urt','instructions'], isThread: false},
-      {path: ['data','home','home_timeline_urt_v2','instructions'], isThread: false},
-      {path: ['data','home','timeline_v2','timeline','instructions'], isThread: false},
-      {path: ['data','home','timeline_v3','timeline','instructions'], isThread: false},
-      {path: ['data','timeline','timeline_v2','instructions'], isThread: false},
-      {path: ['data','search_by_raw_query','search_timeline','timeline','instructions'], isThread: false},
-      {path: ['data','user','result','timeline_v2','timeline','instructions'], isThread: false},
-      {path: ['data','threaded_conversation_with_injections_v2','instructions'], isThread: true},
-      {path: ['data','threaded_conversation_with_injections','instructions'], isThread: true}
+      {path: ['data','home','home_timeline_urt','instructions']},
+      {path: ['data','home','home_timeline_urt_v2','instructions']},
+      {path: ['data','home','timeline_v2','timeline','instructions']},
+      {path: ['data','home','timeline_v3','timeline','instructions']},
+      {path: ['data','timeline','timeline_v2','instructions']},
+      {path: ['data','search_by_raw_query','search_timeline','timeline','instructions']},
+      {path: ['data','user','result','timeline_v2','timeline','instructions']}
     ];
 
-    for (const {path, isThread} of paths) {
+    for (const {path} of paths) {
       let node = json;
       for (let i = 0; i < path.length; i++) {
         if (!node) break;
@@ -241,10 +197,10 @@
       }
       if (Array.isArray(node)) {
         try {
-          const res = processInstructionsEntries(node, isThread);
+          const res = processInstructionsEntries(node);
           if (res) changed = true;
         } catch (e) {
-          console.log(`Path process error: ${e}`);
+          console.log(`[X-Ad-Blocker] Path process error: ${e}`);
         }
       }
     }
@@ -255,7 +211,7 @@
       $done({ body: raw });
     }
   } catch (err) {
-    console.log(`Main error: ${err}`);
+    console.log(`[X-Ad-Blocker] Main error: ${err}`);
     $done({ body: $response.body || '' });
   }
 })();
