@@ -1,0 +1,23 @@
+payload:
+  # === 核心域名 ===
+  - DOMAIN-SUFFIX,claude.ai
+  - DOMAIN-SUFFIX,anthropic.com
+  - DOMAIN-SUFFIX,claude.com
+  
+  # === 静态资源与文件上传 ===
+  - DOMAIN-SUFFIX,claudeusercontent.com
+  
+  # === 登录、验证与安全 (Auth0 / Cloudflare) ===
+  - DOMAIN,cdn.auth0.com
+  - DOMAIN,anthropic.auth0.com
+  - DOMAIN,challenges.cloudflare.com
+  
+  # === 内部功能与统计 (解决页面加载转圈) ===
+  - DOMAIN-SUFFIX,statsigapi.net
+  - DOMAIN-SUFFIX,launchdarkly.com
+  - DOMAIN-SUFFIX,intercom.io
+  - DOMAIN-SUFFIX,intercomcdn.com
+
+  # === 关键字兜底 ===
+  - DOMAIN-KEYWORD,claude
+  - DOMAIN-KEYWORD,anthropic
