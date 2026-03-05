@@ -1,23 +1,28 @@
 payload:
-  # === 核心域名 ===
-  - DOMAIN-SUFFIX,claude.ai
-  - DOMAIN-SUFFIX,anthropic.com
-  - DOMAIN-SUFFIX,claude.com
-  
-  # === 静态资源与文件上传 ===
-  - DOMAIN-SUFFIX,claudeusercontent.com
-  
-  # === 登录、验证与安全 (Auth0 / Cloudflare) ===
-  - DOMAIN,cdn.auth0.com
-  - DOMAIN,anthropic.auth0.com
-  - DOMAIN,challenges.cloudflare.com
-  
-  # === 内部功能与统计 (解决页面加载转圈) ===
-  - DOMAIN-SUFFIX,statsigapi.net
-  - DOMAIN-SUFFIX,launchdarkly.com
-  - DOMAIN-SUFFIX,intercom.io
-  - DOMAIN-SUFFIX,intercomcdn.com
+  # === 核心交互与 API ===
+  - claude.ai
+  - anthropic.com
+  - claude.com
 
-  # === 关键字兜底 ===
-  - DOMAIN-KEYWORD,claude
-  - DOMAIN-KEYWORD,anthropic
+  # === 静态资源、文件上传与图片显示 (极其重要) ===
+  - claudeusercontent.com
+
+  # === 登录与身份验证 (Auth0 平台) ===
+  - auth0.com
+  - anthropic.auth0.com
+  - cdn.auth0.com
+
+  # === 安全验证 (人机验证/防机器人) ===
+  - challenges.cloudflare.com
+  - turnstile.cloudflare.com
+  - hcaptcha.com
+
+  # === 内部功能开关与灰度测试 (解决页面转圈/无法发消息) ===
+  - statsigapi.net
+  - featuregates.org
+  - launchdarkly.com
+
+  # === 错误监控与客服系统 (可选，但建议包含以防加载卡顿) ===
+  - sentry.io
+  - intercom.io
+  - intercomcdn.com
